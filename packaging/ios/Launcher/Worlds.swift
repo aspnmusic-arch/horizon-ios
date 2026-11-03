@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 extension World {
     /// "Survival · 2 hours ago · 26.3", as Select World's second line says it.
@@ -41,10 +42,18 @@ struct WorldsSection: View {
     @State private var sort = WorldSort.recent
     @State private var grid = true
     let newWorld: () -> Void
+
+    init(link: GameLink, newWorld: @escaping () -> Void) {
+        self.link = link
+        self.newWorld = newWorld
+    }
+
     @State private var renaming: World?
     @State private var newName = ""
     @State private var deleting: World?
     @State private var backedUp: String?
+    @State private var choosingWorld = false
+    @State private var importingWorld = false
 
     enum WorldSort: String, CaseIterable {
         case recent = "Last played", name = "Name", mode = "Game mode"
@@ -75,6 +84,11 @@ struct WorldsSection: View {
                     .controlSize(.large).launcherPrimaryButton().disabled(!link.canList)
                     .accessibilityIdentifier("new-world-button")
             }
+            Button { choosingWorld = true } label: {
+                Label(importingWorld ? "Importing world…" : "Import World ZIP", systemImage: "square.and.arrow.down")
+            }
+            .disabled(importingWorld || !link.canList)
+            .accessibilityIdentifier("import-world")
             if !link.canList && link.worlds.isEmpty {
                 ProgressView("Loading worlds…").frame(maxWidth: .infinity).padding(40)
             } else if worlds.isEmpty {
@@ -110,6 +124,12 @@ struct WorldsSection: View {
             }
         }
         .searchable(text: $query, prompt: "Search worlds")
+        .fileImporter(isPresented: $choosingWorld, allowedContentTypes: [.zip]) { result in
+            switch result {
+            case let .success(url): Task { await importWorld(url) }
+            case let .failure(error): link.problem = error.localizedDescription
+            }
+        }
         .alert("Rename world", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("World name", text: $newName)
             Button("Rename") { if let world = renaming { Task { await link.rename(world, to: newName) } } }
@@ -122,6 +142,25 @@ struct WorldsSection: View {
         .alert("Backup saved", isPresented: Binding(get: { backedUp != nil }, set: { if !$0 { backedUp = nil } })) {
             Button("OK", role: .cancel) {}
         } message: { Text(backedUp ?? "") }
+    }
+
+    private func importWorld(_ url: URL) async {
+        guard !importingWorld else { return }
+        importingWorld = true
+        defer { importingWorld = false }
+        do {
+            // A file provider's URL can disappear after access is released. Copy it before asking Rust.
+            let copy = try await Task.detached(priority: .utility) { try WorldImport.copy(url) }.value
+            defer { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
+            let result = await Bridge.send("import-world \(copy.path)")
+            if let error = result.error { link.problem = error; return }
+            guard result["kind"] as? String == "world" else {
+                link.problem = "The game did not confirm the world import."
+                return
+            }
+            await link.reload()
+            Haptics.done()
+        } catch { link.problem = error.localizedDescription }
     }
 
     private func worldCard(_ world: World) -> some View {
@@ -267,5 +306,45 @@ struct LauncherLandscape: View {
                 panorama = image
             }
         }
+    }
+}
+
+/// Copy from Files while the security-scoped URL is open; the engine consumes only this temporary copy.
+private enum WorldImport {
+    static func copy(_ source: URL) throws -> URL {
+        let accessed = source.startAccessingSecurityScopedResource()
+        defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("horizon-world-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let name = source.lastPathComponent
+        let destination = directory.appendingPathComponent(name.lowercased().hasSuffix(".zip") ? name : "world.zip")
+        do {
+            var coordinationError: NSError?
+            var copyError: Error?
+            NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) { readable in
+                do {
+                    let info = try readable.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                    guard info.isRegularFile == true, let bytes = info.fileSize, bytes <= (2 << 30) else {
+                        throw ImportError("Choose a world ZIP smaller than 2 GiB.")
+                    }
+                    try FileManager.default.copyItem(at: readable, to: destination)
+                    let copied = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+                    guard copied <= (2 << 30) else { throw ImportError("The world ZIP exceeds 2 GiB.") }
+                } catch { copyError = error }
+            }
+            if let error = coordinationError { throw error }
+            if let error = copyError { throw error }
+            guard FileManager.default.fileExists(atPath: destination.path) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+    private struct ImportError: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
     }
 }

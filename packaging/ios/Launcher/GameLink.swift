@@ -116,7 +116,13 @@ final class GameLink: ObservableObject {
             if phase != .waiting { GameAudio.stop() }
             phase = .waiting
         case "loading": phase = .loading(state["progress"] as? Double ?? 0)
-        case "needs_files": phase = .needsFiles(state["reason"] as? String)
+        case "needs_files":
+            phase = .needsFiles(state["reason"] as? String)
+            if queued != nil {
+                queued = nil
+                launching = nil
+                problem = (state["reason"] as? String) ?? "Install the game files before playing."
+            }
         case "title": phase = .title
         case "world": phase = .world
         default: phase = .unknown
@@ -158,8 +164,7 @@ final class GameLink: ObservableObject {
     func play(_ world: World? = nil) async {
         Haptics.launch()
         guard let world else {
-            await start()
-            uncover()
+            if await start() { uncover() }
             return
         }
         await go("Opening \(world.name)") { await Bridge.world("open", folder: world.folder) }
@@ -175,22 +180,37 @@ final class GameLink: ObservableObject {
 
     func join(_ address: String) async {
         Haptics.launch()
-        let address = address.trimmingCharacters(in: .whitespaces)
+        let address = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty, !address.contains(where: \.isWhitespace) else {
+            problem = "Enter a server address without spaces."
+            return
+        }
         await go("Joining \(address)") { await Bridge.send("connect \(address)") }
     }
 
     /// Let the game load, if it is still waiting to be started.
-    private func start() async {
+    private func start() async -> Bool {
+        if case let .needsFiles(reason) = phase {
+            problem = reason ?? "Install the game files before playing."
+            return false
+        }
+        if phase == .waiting && !GameFolder.hasGameFiles {
+            problem = "Install the game files before playing."
+            return false
+        }
         if phase == .waiting || phase == .unknown {
-            _ = await Bridge.send("launcher-start")
+            let answer = await Bridge.send("launcher-start")
+            if let error = answer.error { problem = error; return false }
             phase = .loading(0)
         }
+        return true
     }
 
-    /// Ask now, or start the game and ask as soon as it reaches its title; uncover the game once it is on its way.
+    /// Ask now, or start the game and ask as soon as it reaches its title.
     private func go(_ label: String, _ action: @escaping () async -> [String: Any]) async {
+        guard launching == nil else { return }
         launching = label
-        await start()
+        guard await start() else { launching = nil; return }
         if ready {
             await run(action)
         } else {

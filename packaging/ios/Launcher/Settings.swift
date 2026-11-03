@@ -135,16 +135,44 @@ struct SettingsPage: View {
     @ObservedObject var link: GameLink
     @ObservedObject var download: GameFilesDownload
     @State private var showingNews = false
+    @StateObject private var options = GameOptions()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SectionHeader(title: "Game files")
             GameFilesCard(download: download, missing: !GameFolder.hasGameFiles)
 
+            SectionHeader(title: "Game settings")
+            if options.loading && options.options.isEmpty {
+                ProgressView("Loading settings…").frame(maxWidth: .infinity).padding()
+            } else if let issue = options.issue {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(issue).foregroundStyle(Theme.warn)
+                    Button("Retry") { Task { await options.load() } }
+                        .accessibilityIdentifier("settings-retry")
+                }.padding(16).card()
+            } else {
+                ForEach(GameOptions.groups, id: \.title) { group in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label(group.title, systemImage: group.icon).font(.headline)
+                        ForEach(group.rows, id: \.key) { row in
+                            if let option = options.options[row.key] {
+                                GameSettingRow(row: row, option: option, model: options)
+                            }
+                        }
+                    }.padding(16).card()
+                }
+                if !options.unavailable.isEmpty {
+                    Text("Unavailable in this game version: " + options.unavailable.joined(separator: ", "))
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+
             SectionHeader(title: "About")
             SecondaryButton(title: "What's New", icon: "sparkles") { showingNews = true }
             About(version: link.version)
         }
+        .task { await options.load() }
         .sheet(isPresented: $showingNews) {
             ScrollView {
                 NewsPage().pageColumn()
@@ -152,6 +180,74 @@ struct SettingsPage: View {
             .background(Theme.background.ignoresSafeArea())
             .presentationDetents([.large])
 
+        }
+    }
+}
+
+/// A setting is saved by the engine and only treated as committed after its reply.
+private struct GameSettingRow: View {
+    let row: GameOptions.Row
+    let option: GameOption
+    @ObservedObject var model: GameOptions
+    @State private var draft = 0.0
+    @State private var editing = false
+    @State private var saving = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if option.type == "bool" {
+                Toggle(row.title, isOn: Binding(get: { option.flag }, set: { save($0 ? "true" : "false") }))
+                    .accessibilityIdentifier("setting-" + row.key)
+            } else if option.type == "enum" || !row.names.isEmpty {
+                Picker(row.title, selection: Binding(get: { selection }, set: { save($0) })) {
+                    ForEach(choices, id: \.self) { value in
+                        Text(row.names[value] ?? value.capitalized).tag(value)
+                    }
+                }
+                .accessibilityIdentifier("setting-" + row.key)
+            } else if let lower = option.min, let upper = upperBound, upper > lower {
+                HStack { Text(row.title); Spacer(); Text(row.format(editing ? draft : option.number)).foregroundStyle(.secondary) }
+                Slider(value: Binding(get: { min(max(editing ? draft : option.number, lower), upper) }, set: { draft = $0 }),
+                       in: lower...upper, step: option.step ?? (option.type == "int" ? 1 : 0.01),
+                       onEditingChanged: { active in
+                           if active { draft = min(max(option.number, lower), upper); editing = true }
+                           else {
+                               editing = false
+                               save(option.type == "int" ? String(Int(draft.rounded())) : String(draft))
+                           }
+                       })
+                    .accessibilityLabel(row.title)
+                    .accessibilityIdentifier("setting-" + row.key)
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(Theme.warn) }
+        }
+        .disabled(saving)
+    }
+
+    private var upperBound: Double? {
+        switch (option.max, row.cap) {
+        case let (max?, cap?): return min(max, cap)
+        case let (max?, nil): return max
+        case let (nil, cap?): return cap
+        default: return nil
+        }
+    }
+    private var choices: [String] {
+        if option.type == "enum" { return option.choices }
+        guard let min = option.min, let max = option.max, max - min <= 30 else { return [] }
+        return (Int(min)...Int(max)).map(String.init)
+    }
+    private var selection: String {
+        option.type == "enum" ? option.text : String(Int(option.number))
+    }
+    private func save(_ value: String) {
+        guard !saving else { return }
+        saving = true
+        error = nil
+        Task {
+            error = await model.set(row.key, value)
+            saving = false
         }
     }
 }

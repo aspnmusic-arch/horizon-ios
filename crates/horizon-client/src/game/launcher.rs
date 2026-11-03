@@ -78,7 +78,11 @@ fn deliver() -> bool {
 /// Install the archive named by `import PATH` on a worker: a prepared tree is hundreds of megabytes.
 fn start_import(request: horizon_ios_launcher::Request) {
     let command = request.line.split_whitespace().next().unwrap_or_default();
-    let resources_only = command == "import-game-files";
+    let expected = match command {
+        "import-game-files" => Some(Kind::Resources),
+        "import-world" => Some(Kind::World),
+        _ => None,
+    };
     let path = request
         .line
         .trim_start()
@@ -95,8 +99,7 @@ fn start_import(request: horizon_ios_launcher::Request) {
     let spawned = std::thread::Builder::new()
         .name("horizon-import".into())
         .spawn(move || {
-            let installed =
-                install_archive(&path, &home, resources_only).map_err(|e| e.to_string());
+            let installed = install_archive(&path, &home, expected).map_err(|e| e.to_string());
             let _ = sender.send(installed);
         });
     match spawned {
@@ -108,13 +111,15 @@ fn start_import(request: horizon_ios_launcher::Request) {
 fn install_archive(
     path: &std::path::Path,
     home: &std::path::Path,
-    resources_only: bool,
+    expected: Option<Kind>,
 ) -> Result<Installed> {
     let pack = Pack::open(path)?;
-    if resources_only && pack.kind != Kind::Resources {
+    if let Some(expected) = expected
+        && pack.kind != expected
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "The automatic download did not contain game files.",
+            format!("The archive did not contain {}.", expected.label()),
         )
         .into());
     }
@@ -156,7 +161,7 @@ impl Game<'_> {
                     });
                     request.answer(&state.to_string());
                 }
-                "import" | "import-game-files" => start_import(request),
+                "import" | "import-game-files" | "import-world" => start_import(request),
                 // The game is up: the download screen has nothing left to show.
                 "download-state" => request.answer(r#"{"phase":"done"}"#),
                 "launcher-start" => request.answer(r#"{"ok":true}"#),
@@ -383,7 +388,7 @@ impl Loading {
                     };
                     request.answer(&answer.to_string());
                 }
-                "import" | "import-game-files" => start_import(request),
+                "import" | "import-game-files" | "import-world" => start_import(request),
                 "launcher-session" => session_request(request),
                 "options-get" | "options-set" => {
                     let answer = self.launcher_options(&request.line);
@@ -444,16 +449,46 @@ mod tests {
         let archive = root.join("world.zip");
         horizon_client::import::pack(&world, &archive, |_, _| {}).unwrap();
         let home = root.join("home");
-        let error = super::install_archive(&archive, &home, true).unwrap_err();
+        let error = super::install_archive(
+            &archive,
+            &home,
+            Some(horizon_client::import::Kind::Resources),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("did not contain game files"));
         assert!(
             !home.exists(),
             "Wrong-kind download must not touch player data"
         );
         assert!(archive.exists());
-        let installed = super::install_archive(&archive, &home, false).unwrap();
+        let installed = super::install_archive(&archive, &home, None).unwrap();
         assert_eq!(installed.kind, horizon_client::import::Kind::World);
         assert!(installed.path.join("level.dat").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn world_picker_rejects_resource_archives_without_changing_the_game() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "horizon-world-picker-{}-{nonce}",
+            std::process::id()
+        ));
+        let resources = root.join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("horizon-resources.json"), b"{}").unwrap();
+        let archive = root.join("resources.zip");
+        horizon_client::import::pack(&resources, &archive, |_, _| {}).unwrap();
+        let home = root.join("home");
+        let error =
+            super::install_archive(&archive, &home, Some(horizon_client::import::Kind::World))
+                .unwrap_err();
+        assert!(error.to_string().contains("did not contain world"));
+        assert!(!home.exists());
+        assert!(archive.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

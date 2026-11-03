@@ -1,5 +1,11 @@
 # The iOS app shell: what Horizon's simulation says on an iPhone
 
+> The launcher in `Launcher/` is embedded in the game bundle via `HorizonLauncherKit`.
+> For the Android 0.7.7 comparison, what has been adapted, and what still needs
+> porting and device verification, see [ANDROID_PORT.md](ANDROID_PORT.md). The
+> older shell and game-bundle explanation below does not describe every feature
+> of the current native launcher.
+
 Three files and one crate make the app shell, and a fourth puts the game itself in a bundle beside it.
 
 - `project.yml`: the Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. Run

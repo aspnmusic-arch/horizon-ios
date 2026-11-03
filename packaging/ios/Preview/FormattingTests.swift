@@ -370,3 +370,22 @@ final class AutomaticGameFilesTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: marker), Data("manual-transfer-fixture".utf8))
     }
 }
+
+final class PackIntegrityTests: XCTestCase {
+    func testChecksumAndLengthAreRequiredBeforeInstalling() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("sample.zip")
+        try Data("abc".utf8).write(to: file)
+        let checksum = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +
+            "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        XCTAssertNoThrow(try PackIntegrity.verify(file: file, checksum: checksum, expectedBytes: 3))
+        XCTAssertNoThrow(try PackIntegrity.verify(file: file, checksum: checksum.uppercased(), expectedBytes: 3))
+        XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: checksum, expectedBytes: 4))
+        XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: checksum, expectedBytes: 2))
+        XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: String(repeating: "0", count: 128), expectedBytes: 3))
+        XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: "bad", expectedBytes: 3))
+        XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: checksum, expectedBytes: PackIntegrity.maximumBytes + 1))
+    }
+}

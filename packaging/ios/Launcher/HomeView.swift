@@ -15,6 +15,7 @@ struct HomeView: View {
     @State private var editingName = false
     @State private var nameDraft = ""
     @State private var nameRejected = false
+    @State private var creatingWorld = false
 
     enum Destination: String, CaseIterable, Identifiable {
         case play, packs, settings
@@ -79,6 +80,12 @@ struct HomeView: View {
         .background(Theme.background.ignoresSafeArea())
         .tint(Theme.accent)
         .sheet(isPresented: $showingAccount) { accountSheet }
+        .sheet(isPresented: $creatingWorld) {
+            NewWorldSheet { settings in
+                creatingWorld = false
+                Task { await link.create(settings) }
+            }
+        }
         .alert("Something went wrong", isPresented: Binding(
             get: { link.problem != nil }, set: { if !$0 { link.problem = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(link.problem ?? "") }
@@ -164,6 +171,24 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 28) {
             launchPanel
             if needsFiles { GameFilesCard(download: download, missing: true) }
+            NavigationLink {
+                page {
+                    WorldsSection(link: link, newWorld: { creatingWorld = true })
+                        .task { await link.reload() }
+                }.navigationTitle("Worlds")
+            } label: {
+                Label("Worlds", systemImage: "globe.americas")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(16).card()
+            }.accessibilityIdentifier("launcher-worlds")
+            NavigationLink {
+                page {
+                    ServersPage(link: link, account: account)
+                        .task { await link.reloadServers() }
+                }.navigationTitle("Servers")
+            } label: {
+                Label("Servers", systemImage: "network")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(16).card()
+            }.accessibilityIdentifier("launcher-servers")
         }
     }
 

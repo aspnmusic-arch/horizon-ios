@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import UIKit
 
@@ -89,6 +90,9 @@ final class PackStore: ObservableObject {
     /// Download `project`'s file for `version` (the game's Minecraft version) into `kind`'s folder.
     func install(_ project: ModrinthProject, kind: PackKind, version: String) async -> Result<Installed, PackError> {
         guard downloading[project.id] == nil else { return .failure(PackError("This pack is already downloading.")) }
+        guard !project.id.isEmpty, project.id.utf8.allSatisfy({
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+        }) else { return .failure(PackError("The pack has an invalid project ID.")) }
         downloading[project.id] = 0
         defer { downloading[project.id] = nil }
         let versions = await fetch(URL(string: "\(Self.api)/project/\(project.id)/version")!) as? [[String: Any]] ?? []
@@ -101,27 +105,34 @@ final class PackStore: ObservableObject {
               link.scheme?.lowercased() == "https", link.host != nil,
               let name = file["filename"] as? String,
               // A file name from the network names a file here: no folders in it.
-              !name.isEmpty, !name.contains("/"), !name.contains("\\"), !name.hasPrefix("."), name.lowercased().hasSuffix(".zip")
+              !name.isEmpty, !name.contains("/"), !name.contains("\\"), !name.hasPrefix("."), name.lowercased().hasSuffix(".zip"),
+              let hashes = file["hashes"] as? [String: String],
+              let checksum = hashes["sha512"], PackIntegrity.validChecksum(checksum),
+              let size = (file["size"] as? NSNumber)?.int64Value, size > 0, size <= PackIntegrity.maximumBytes
         else {
-            return .failure(PackError("\(project.title) has no file to download."))
+            return .failure(PackError("\(project.title) has no verifiable ZIP to download."))
         }
         var request = URLRequest(url: link)
         request.setValue(Self.agent, forHTTPHeaderField: "User-Agent")
         do {
             let (temporary, response) = try await URLSession.shared.download(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  response.url?.scheme?.lowercased() == "https" else {
                 return .failure(PackError("Modrinth refused the download of \(project.title)."))
             }
+            // Verify before touching an installed pack. Keep hashing off the UI thread.
+            try await Task.detached(priority: .utility) {
+                try PackIntegrity.verify(file: temporary, checksum: checksum, expectedBytes: size)
+            }.value
+            try Task.checkCancellation()
             try FileManager.default.createDirectory(at: kind.folder, withIntermediateDirectories: true)
             let destination = kind.folder.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: destination.path) {
-                var isDirectory: ObjCBool = false
-                _ = FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory)
-                guard !isDirectory.boolValue else { return .failure(PackError("A folder already uses this pack filename.")) }
-                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-            } else {
-                try FileManager.default.moveItem(at: temporary, to: destination)
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                return .failure(PackError("A pack with this filename already exists. Remove or rename it before downloading."))
             }
+            // moveItem fails if a file appeared since the check, rather than replacing it.
+            try FileManager.default.moveItem(at: temporary, to: destination)
             reloadInstalled()
             let made = (chosen["game_versions"] as? [String])?.last ?? "another version"
             let note = fitting == nil ? "It was made for Minecraft \(made), so it may not look right on \(version)." : nil
@@ -164,6 +175,44 @@ final class PackStore: ObservableObject {
               (response as? HTTPURLResponse)?.statusCode == 200
         else { return nil }
         return try? JSONSerialization.jsonObject(with: data)
+    }
+}
+
+/// Android 0.7.7 verifies catalog files before installing them; do the same on iOS.
+enum PackIntegrity {
+    static let maximumBytes: Int64 = 256 * 1024 * 1024
+
+    static func validChecksum(_ checksum: String) -> Bool {
+        checksum.utf8.count == 128 && checksum.utf8.allSatisfy {
+            (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+        }
+    }
+
+    static func verify(file: URL, checksum: String, expectedBytes: Int64) throws {
+        guard validChecksum(checksum), expectedBytes > 0, expectedBytes <= maximumBytes else {
+            throw IntegrityError("The pack has invalid download metadata.")
+        }
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hash = SHA512()
+        var count: Int64 = 0
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            count += Int64(chunk.count)
+            guard count <= expectedBytes, count <= maximumBytes else {
+                throw IntegrityError("The downloaded pack has an unexpected size.")
+            }
+            hash.update(data: chunk)
+        }
+        guard count == expectedBytes else { throw IntegrityError("The downloaded pack is incomplete.") }
+        let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actual.caseInsensitiveCompare(checksum) == .orderedSame else {
+            throw IntegrityError("The downloaded pack failed its checksum. Try again.")
+        }
+    }
+
+    private struct IntegrityError: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
     }
 }
 

@@ -106,15 +106,42 @@ final class LauncherLayoutTests: XCTestCase {
         XCTAssertEqual(field.value as? String, "TrailRider")
         app.buttons["Cancel"].tap()
     }
-    func testLauncherSettingsKeepOnlyGameFilesAndAbout() {
+    func testSettingsShowFailureAndRetry() {
         let app = launch(signedIn: false, optionsResponse: "error")
         app.tabBars.buttons["Settings"].tap()
         XCTAssertTrue(app.staticTexts["Game files"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["About"].exists)
-        for title in ["Video", "Sound", "Controls", "Input", "iPad keyboard + pointer lock"] {
-            XCTAssertFalse(app.staticTexts[title].exists)
-        }
-        XCTAssertFalse(app.buttons["settings-retry"].exists)
+        app.swipeUp()
+        XCTAssertTrue(app.buttons["settings-retry"].waitForExistence(timeout: 8))
+    }
+
+    func testGameSettingsAreEditable() {
+        let app = launch(signedIn: false)
+        app.tabBars.buttons["Settings"].tap()
+        app.swipeUp()
+        let autoJump = app.switches["setting-autoJump"]
+        for _ in 0..<5 where !autoJump.isHittable { app.swipeUp() }
+        XCTAssertTrue(autoJump.waitForExistence(timeout: 8))
+        let old = autoJump.value as? String
+        autoJump.tap()
+        XCTAssertNotEqual(autoJump.value as? String, old)
+        app.tabBars.buttons["Play"].tap()
+        app.tabBars.buttons["Settings"].tap()
+        for _ in 0..<5 where !autoJump.isHittable { app.swipeUp() }
+        XCTAssertNotEqual(autoJump.value as? String, old)
+    }
+
+    func testWorldAndServerPagesAreAvailableFromPlay() {
+        let app = launch(signedIn: false)
+        app.swipeUp()
+        let worlds = app.buttons["launcher-worlds"]
+        XCTAssertTrue(worlds.waitForExistence(timeout: 8))
+        worlds.tap()
+        XCTAssertTrue(app.buttons["import-world"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["new-world-button"].exists)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.swipeUp()
+        app.buttons["launcher-servers"].tap()
+        XCTAssertTrue(app.staticTexts["Saved servers"].waitForExistence(timeout: 8))
     }
 
     func testNativeTabBarHasOnlyThreeDestinationsAndNavigates() {
