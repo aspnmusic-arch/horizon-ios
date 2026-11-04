@@ -47,7 +47,9 @@ jobs:
         if: runner.environment == 'github-hosted'
         with:
           shared-key: ios-${{ env.IOS_TARGET }}
+      # Temporary artifact-only run: the normal branch runs these tests separately.
       - name: Test the iOS launcher account and controls
+        if: ${{ false }}
         run: |
           set -euo pipefail
           command -v xcodegen >/dev/null || brew install xcodegen
