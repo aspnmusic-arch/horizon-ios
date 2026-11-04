@@ -103,7 +103,7 @@ jobs:
       - name: Send the .ipa to Discord
         # Delivery is optional: the IPA is already available in the run's artifacts.
         continue-on-error: true
-        if: github.event_name != 'pull_request' && env.DISCORD_IPA_WEBHOOK != ''
+        if: github.event_name == 'push' && env.DISCORD_IPA_WEBHOOK != ''
         env:
           DISCORD_IPA_WEBHOOK: ${{ secrets.DISCORD_IPA_WEBHOOK }}
         run: |
