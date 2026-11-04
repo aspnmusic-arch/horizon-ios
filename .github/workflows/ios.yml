@@ -45,6 +45,28 @@ jobs:
         if: runner.environment == 'github-hosted'
         with:
           shared-key: ios-${{ env.IOS_TARGET }}
+      - name: Test the iOS launcher account and controls
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          ( cd packaging/ios/Preview && xcodegen generate )
+          xcodebuild -project packaging/ios/Preview/LauncherPreview.xcodeproj \
+            -scheme LauncherPreview -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
+            -only-testing:LauncherLogicTests/TouchEditorTests \
+            -only-testing:LauncherLogicTests/MicrosoftClientConfigurationTests \
+            CODE_SIGNING_ALLOWED=NO test > xcode-launcher-tests.log 2>&1 || {
+              tail -100 xcode-launcher-tests.log
+              exit 1
+            }
+      - name: Preserve the launcher test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-launcher-test-log
+          path: xcode-launcher-tests.log
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Build the game
         # The Microsoft sign-in app (msa.rs): a repository variable overrides the built-in one; unset, it stays.
         env:

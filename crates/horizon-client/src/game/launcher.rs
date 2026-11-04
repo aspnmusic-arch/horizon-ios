@@ -140,6 +140,43 @@ fn installed_json(installed: &Installed) -> Value {
     })
 }
 
+/// The native editor works before and after the engine loads, through the same bridge.
+fn touch_preferences_request(request: horizon_ios_launcher::Request) {
+    use horizon_client::touch_preferences::{self, Preferences};
+    let command = request.line.split_whitespace().next().unwrap_or_default();
+    let answer = match command {
+        "touch-controls-get" => {
+            json!({ "ok": true, "settings": touch_preferences::editor(&touch_preferences::current()), "defaults": touch_preferences::editor(&Preferences::default()) })
+        }
+        "touch-controls-reset" => match touch_preferences::save(Preferences::default()) {
+            Ok(()) => {
+                json!({ "ok": true, "settings": touch_preferences::editor(&Preferences::default()) })
+            }
+            Err(e) => json!({ "error": format!("Could not reset controls: {e}") }),
+        },
+        "touch-controls-set" => {
+            let data = request
+                .line
+                .strip_prefix(command)
+                .unwrap_or_default()
+                .trim();
+            if data.len() > 65_536 {
+                json!({ "error": "Control settings are too large." })
+            } else {
+                match serde_json::from_str::<Preferences>(data) {
+                    Ok(prefs) => match touch_preferences::save(prefs) {
+                        Ok(()) => json!({ "ok": true }),
+                        Err(e) => json!({ "error": format!("Could not save controls: {e}") }),
+                    },
+                    Err(_) => json!({ "error": "Invalid control settings." }),
+                }
+            }
+        }
+        _ => json!({ "error": "Unknown controls command." }),
+    };
+    request.answer(&answer.to_string());
+}
+
 impl Game<'_> {
     /// The launcher's requests, once a frame: its own lines here, the rest through the control socket's
     /// dispatcher, as if horizon-ctl had sent them.
@@ -166,6 +203,9 @@ impl Game<'_> {
                 "download-state" => request.answer(r#"{"phase":"done"}"#),
                 "launcher-start" => request.answer(r#"{"ok":true}"#),
                 "launcher-session" => session_request(request),
+                "touch-controls-get" | "touch-controls-set" | "touch-controls-reset" => {
+                    touch_preferences_request(request);
+                }
                 "launcher-world" => self.launcher_world(request),
                 _ => {
                     let (reply, answers) = mpsc::channel();
@@ -390,6 +430,9 @@ impl Loading {
                 }
                 "import" | "import-game-files" | "import-world" => start_import(request),
                 "launcher-session" => session_request(request),
+                "touch-controls-get" | "touch-controls-set" | "touch-controls-reset" => {
+                    touch_preferences_request(request);
+                }
                 "options-get" | "options-set" => {
                     let answer = self.launcher_options(&request.line);
                     request.answer(&answer.to_string());

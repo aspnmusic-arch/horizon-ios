@@ -20,6 +20,11 @@ pub enum Control {
     Chat,
     Pause,
     Inventory,
+    /// Optional extra controls, placed by the launcher editor.
+    Attack,
+    Use,
+    Sprint,
+    Drop,
     Hotbar(u8),
 }
 

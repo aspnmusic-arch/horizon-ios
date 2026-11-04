@@ -144,6 +144,24 @@ final class LauncherLayoutTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Saved servers"].waitForExistence(timeout: 8))
     }
 
+    func testTouchEditorShowsAndSavesControls() {
+        let app = launch(signedIn: false)
+        app.tabBars.buttons["Settings"].tap()
+        let open = app.buttons["touch-editor-open"]
+        for _ in 0..<5 where !open.isHittable { app.swipeUp() }
+        XCTAssertTrue(open.waitForExistence(timeout: 8))
+        open.tap()
+        XCTAssertTrue(app.otherElements["touch-layout-preview"].waitForExistence(timeout: 8))
+        let opacity = app.sliders["touch-opacity"]
+        for _ in 0..<3 where !opacity.isHittable { app.swipeUp() }
+        XCTAssertTrue(opacity.exists)
+        opacity.adjust(toNormalizedSliderPosition: 0.5)
+        let save = app.buttons["touch-save"]
+        XCTAssertTrue(save.isEnabled)
+        save.tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 8))
+    }
+
     func testNativeTabBarHasOnlyThreeDestinationsAndNavigates() {
         let app = launch(signedIn: false)
         let bar = app.tabBars.firstMatch

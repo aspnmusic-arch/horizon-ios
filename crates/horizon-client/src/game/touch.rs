@@ -7,6 +7,7 @@ use horizon_client::{
     Result,
     hud::{HudBatch, rgba},
     touch::{self, Control, Out, Touches},
+    touch_preferences,
 };
 use std::time::Instant;
 use winit::{
@@ -66,7 +67,9 @@ fn key_of(control: Control) -> Option<KeyCode> {
         Control::Chat => KeyCode::KeyT,
         Control::Pause => KeyCode::Escape,
         Control::Inventory => KeyCode::KeyE,
-        Control::Sneak | Control::Hotbar(_) => return None,
+        Control::Sprint => KeyCode::ControlLeft,
+        Control::Drop => KeyCode::KeyQ,
+        Control::Sneak | Control::Attack | Control::Use | Control::Hotbar(_) => return None,
     })
 }
 
@@ -188,7 +191,8 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        let layout = touch::layout(batch.width, batch.height);
+        let layout =
+            touch_preferences::layout(batch.width, batch.height, &touch_preferences::current());
         let out = match touch.phase {
             TouchPhase::Started => {
                 let now = self.touch_now();
@@ -278,6 +282,23 @@ impl Game<'_> {
         for o in out {
             match o {
                 Out::Press(Control::Hotbar(slot)) => self.selected = usize::from(slot),
+                Out::Press(control @ (Control::Attack | Control::Use))
+                | Out::Release(control @ (Control::Attack | Control::Use)) => {
+                    let pressed = matches!(o, Out::Press(_));
+                    let button = if control == Control::Attack {
+                        MouseButton::Left
+                    } else {
+                        MouseButton::Right
+                    };
+                    if pressed {
+                        // Keep a quick tap down for a game tick, just like a world tap.
+                        self.touch.late.retain(|(pending, _)| *pending != button);
+                        self.touch_grab();
+                        self.play_mouse(button, true)?;
+                    } else {
+                        self.touch.late.push((button, self.ticks));
+                    }
+                }
                 Out::Press(Control::Sneak) => {
                     // A toggle either way: the crouch option toggles a press, otherwise flip the held key
                     // (as a controller's stick click does).
@@ -529,12 +550,21 @@ impl Game<'_> {
             return;
         }
         let atlas = &self.gui.atlas;
-        for (control, r) in touch::layout(batch.width, batch.height) {
+        let prefs = touch_preferences::current();
+        for (control, r) in touch_preferences::layout(batch.width, batch.height, &prefs) {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
             }
-            touch_button(batch, atlas, r, self.touch.fingers.held(control));
-            shadowed(r, |r, color| glyph(batch, atlas, control, r, color));
+            touch_button(
+                batch,
+                atlas,
+                r,
+                self.touch.fingers.held(control),
+                prefs.opacity,
+            );
+            shadowed(r, prefs.opacity, |r, color| {
+                glyph(batch, atlas, control, r, color)
+            });
         }
     }
 }
@@ -551,8 +581,8 @@ impl Game<'_> {
         let atlas = &self.gui.atlas;
         if self.touch_close_shown() {
             let r = touch::close_rect(batch.width, batch.height);
-            touch_button(batch, atlas, r, held);
-            shadowed(r, |r, color| {
+            touch_button(batch, atlas, r, held, 1.0);
+            shadowed(r, 1.0, |r, color| {
                 // Two diagonals of cells.
                 let u = cell_size(r);
                 let (cx, cy) = ((r[0] + r[2] / 2.0).floor(), (r[1] + r[3] / 2.0).floor());
@@ -565,8 +595,8 @@ impl Game<'_> {
         }
         if keyboard {
             let r = touch::keyboard_rect(batch.width, batch.height);
-            touch_button(batch, atlas, r, false);
-            shadowed(r, |r, color| {
+            touch_button(batch, atlas, r, false, 1.0);
+            shadowed(r, 1.0, |r, color| {
                 // A keyboard: two rows of keys over a space bar.
                 let u = cell_size(r) * 0.75;
                 let (cx, cy) = ((r[0] + r[2] / 2.0).floor(), (r[1] + r[3] / 2.0).floor());
@@ -594,7 +624,9 @@ impl Game<'_> {
         let px = |r: touch::Rect| r.map(|v| v * batch.scale);
         let mut buttons = Vec::new();
         if self.touch_playing() {
-            for (control, r) in touch::layout(batch.width, batch.height) {
+            for (control, r) in
+                touch_preferences::layout(batch.width, batch.height, &touch_preferences::current())
+            {
                 let label = match control {
                     Control::Forward => "▲".to_owned(),
                     Control::Back => "▼".to_owned(),
@@ -606,6 +638,10 @@ impl Game<'_> {
                     Control::Chat => "Chat".to_owned(),
                     Control::Pause => "II".to_owned(),
                     Control::Inventory => "•••".to_owned(),
+                    Control::Attack => "Attack".to_owned(),
+                    Control::Use => "Use".to_owned(),
+                    Control::Sprint => "Sprint".to_owned(),
+                    Control::Drop => "Drop".to_owned(),
                     Control::Hotbar(slot) => (slot + 1).to_string(),
                 };
                 buttons.push(horizon_airplay::Button {
@@ -641,13 +677,14 @@ fn touch_button(
     atlas: &horizon_client::hud::HudAtlas,
     r: touch::Rect,
     held: bool,
+    opacity: f32,
 ) {
     let sprite = if held {
         "gui/sprites/widget/button_highlighted"
     } else {
         "gui/sprites/widget/button"
     };
-    let alpha = if held { 230 } else { 170 };
+    let alpha = ((if held { 230.0 } else { 170.0 }) * opacity).round() as u8;
     horizon_client::ui::nine_slice(
         batch,
         atlas,
@@ -666,10 +703,14 @@ fn cell_size(r: touch::Rect) -> f32 {
 }
 
 /// Draw a mark twice, as Minecraft draws text: a dark copy a little down and right, then the white one.
-fn shadowed(r: touch::Rect, mut mark: impl FnMut(touch::Rect, u32)) {
+fn shadowed(r: touch::Rect, opacity: f32, mut mark: impl FnMut(touch::Rect, u32)) {
     let off = (cell_size(r) / 2.0).max(1.0);
-    mark([r[0] + off, r[1] + off, r[2], r[3]], rgba(63, 63, 63, 230));
-    mark(r, rgba(255, 255, 255, 240));
+    let alpha = |value: f32| (value * opacity).round() as u8;
+    mark(
+        [r[0] + off, r[1] + off, r[2], r[3]],
+        rgba(63, 63, 63, alpha(230.0)),
+    );
+    mark(r, rgba(255, 255, 255, alpha(240.0)));
 }
 
 /// A button's mark, in cells of a few pixels centred on it.
@@ -741,6 +782,22 @@ fn glyph(
                 cell(batch, x, -0.5, 1.0, 1.0);
             }
         }
+        Control::Attack => {
+            for i in -3..=3 {
+                let d = i as f32;
+                cell(batch, d - 0.5, d - 0.5, 1.0, 1.0);
+                cell(batch, -d - 0.5, d - 0.5, 1.0, 1.0);
+            }
+        }
+        Control::Use => {
+            cell(batch, -0.5, -3.0, 1.0, 6.0);
+            cell(batch, -3.0, -0.5, 6.0, 1.0);
+        }
+        Control::Sprint => {
+            arrow(batch, (0.0, -1.0));
+            cell(batch, -3.0, 3.0, 6.0, 1.0);
+        }
+        Control::Drop => arrow(batch, (0.0, 1.0)),
         Control::Hotbar(_) => {}
     }
 }

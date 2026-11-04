@@ -142,6 +142,15 @@ struct SettingsPage: View {
             SectionHeader(title: "Game files")
             GameFilesCard(download: download, missing: !GameFolder.hasGameFiles)
 
+            SectionHeader(title: "Touch controls")
+            NavigationLink {
+                TouchControlsEditor()
+            } label: {
+                Label("Customize touch controls", systemImage: "hand.draw")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(16).card()
+            }
+            .accessibilityIdentifier("touch-editor-open")
+
             SectionHeader(title: "Game settings")
             if options.loading && options.options.isEmpty {
                 ProgressView("Loading settings…").frame(maxWidth: .infinity).padding()

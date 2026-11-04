@@ -389,3 +389,57 @@ final class PackIntegrityTests: XCTestCase {
         XCTAssertThrowsError(try PackIntegrity.verify(file: file, checksum: checksum, expectedBytes: PackIntegrity.maximumBytes + 1))
     }
 }
+
+@MainActor
+final class TouchEditorTests: XCTestCase {
+    func testEditingIsADraftUntilTheEngineConfirmsSave() async throws {
+        let sample = TouchConfiguration(opacity: 1, buttons: [
+            TouchButtonSetting(id: "jump", x: 0.8, y: 0.6, scale: 1, visible: true),
+        ])
+        let data = try JSONEncoder().encode(sample)
+        let object = try JSONSerialization.jsonObject(with: data)
+        var writes: [String] = []
+        let model = TouchEditorModel(request: { line in
+            if line == "touch-controls-get" { return ["settings": object, "defaults": object] }
+            writes.append(line)
+            return ["ok": true]
+        })
+        await model.load()
+        model.draft.buttons[0].x = 0.4
+        model.draft.buttons[0].scale = 1.5
+        XCTAssertTrue(writes.isEmpty)
+        let saved = await model.save()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(writes.count, 1)
+        let sent = String(writes[0].dropFirst("touch-controls-set ".count))
+        let decoded = try JSONDecoder().decode(TouchConfiguration.self, from: Data(sent.utf8))
+        XCTAssertEqual(decoded.buttons[0].x, 0.4)
+        XCTAssertEqual(decoded.buttons[0].scale, 1.5)
+        model.resetDraft()
+        XCTAssertEqual(model.draft, sample)
+    }
+
+    func testFailedSaveStaysOnEditorAndPlayWaitsForAccount() async {
+        let model = TouchEditorModel(request: { _ in ["error": "Save failed"] })
+        let saved = await model.save()
+        XCTAssertFalse(saved)
+        XCTAssertEqual(model.error, "Save failed")
+        let link = GameLink()
+        var uncovered = false
+        link.prepareAccount = { false }
+        link.uncover = { uncovered = true }
+        await link.play()
+        XCTAssertFalse(uncovered)
+        XCTAssertNotNil(link.problem)
+    }
+}
+
+@MainActor
+final class MicrosoftClientConfigurationTests: XCTestCase {
+    func testOnlyValidApplicationIDsAreAccepted() {
+        XCTAssertEqual(MicrosoftAccount.normalizeClientID("  12345678-1234-1234-1234-123456789ABC  "),
+                       "12345678-1234-1234-1234-123456789abc")
+        XCTAssertNil(MicrosoftAccount.normalizeClientID("not-an-application-id"))
+        XCTAssertNil(MicrosoftAccount.normalizeClientID(""))
+    }
+}

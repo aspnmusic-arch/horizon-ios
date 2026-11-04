@@ -26,6 +26,7 @@ private let previewSubmit: HorizonSubmit = { pointer, context, done in
 #endif
     let response: [String: Any]
     if let options = PreviewOptions.reply(line) { response = options }
+    else if let touch = PreviewTouch.reply(line) { response = touch }
     else { switch line {
     case "launcher-state": response = ["phase": ProcessInfo.processInfo.environment["PREVIEW_MISSING_FILES"] == "1" ? "waiting" : "title", "version": "26.3"]
     case "game-files-source":

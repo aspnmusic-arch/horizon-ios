@@ -92,6 +92,8 @@ final class GameLink: ObservableObject {
 
     /// Uncover the game (Present.swift dismisses the launcher).
     var uncover: () -> Void = {}
+    /// The account must be ready before the engine opens a world or connects.
+    var prepareAccount: (() async -> Bool)?
     /// What to ask as soon as the title screen can take it: Play tapped while the game was loading.
     private var queued: (() async -> [String: Any])?
 
@@ -190,6 +192,14 @@ final class GameLink: ObservableObject {
 
     /// Let the game load, if it is still waiting to be started.
     private func start() async -> Bool {
+        guard let prepareAccount else {
+            problem = "Account setup is still starting. Try again in a moment."
+            return false
+        }
+        guard await prepareAccount() else {
+            problem = "Finish signing in or check your account before playing."
+            return false
+        }
         if case let .needsFiles(reason) = phase {
             problem = reason ?? "Install the game files before playing."
             return false

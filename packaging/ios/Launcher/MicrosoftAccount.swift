@@ -24,18 +24,41 @@ final class MicrosoftAccount: ObservableObject {
 
     @Published private(set) var profile: Profile?
     @Published private(set) var state = State.idle
+    /// True only after the current Minecraft session was acknowledged by the engine.
+    @Published private(set) var sessionReady = false
+    @Published private(set) var clientConfigured = false
     private var signing: Task<Void, Never>?
+    private var handoverTask: Task<Bool, Never>?
     private var generation = UUID()
-    private var renewing = false
 
-    /// The Azure app this build signs in with, if it has one.
+    /// The public application ID belongs to this launcher, not a secret or player credential.
     static var clientID: String? {
-        (Bundle.main.object(forInfoDictionaryKey: "HorizonMSAClientID") as? String)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .flatMap { $0.isEmpty || $0.hasPrefix("$(") ? nil : $0 }
+        let bundled = (Bundle.main.object(forInfoDictionaryKey: "HorizonMSAClientID") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let bundled, !bundled.isEmpty, !bundled.hasPrefix("$(") { return bundled }
+        return UserDefaults.standard.string(forKey: "horizonMicrosoftClientID")
+            .flatMap(normalizeClientID)
+    }
+
+    static func normalizeClientID(_ value: String) -> String? {
+        UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines))?.uuidString.lowercased()
+    }
+
+    /// A developer can configure their own approved app without replacing the player's build.
+    @discardableResult
+    func configureClientID(_ value: String) -> Bool {
+        guard profile == nil, let id = Self.normalizeClientID(value) else {
+            state = .failed("Enter the application (client) ID as a UUID, while signed out.")
+            return false
+        }
+        UserDefaults.standard.set(id, forKey: "horizonMicrosoftClientID")
+        clientConfigured = Self.clientID != nil
+        state = .idle
+        return clientConfigured
     }
 
     init() {
+        clientConfigured = Self.clientID != nil
         if let data = UserDefaults.standard.data(forKey: "microsoftProfile") {
             profile = try? JSONDecoder().decode(Profile.self, from: data)
         }
@@ -51,13 +74,12 @@ final class MicrosoftAccount: ObservableObject {
         cancel()
         let attempt = generation
         signing = Task {
+            defer { if generation == attempt { signing = nil } }
             do {
                 let tokens = try await deviceCode(client)
                 try await finish(microsoft: tokens, attempt: attempt)
-                await handOver()
-                guard generation == attempt else { return }
-                if case .failed = state { return }
-                state = .idle
+                let ready = await handOver()
+                guard generation == attempt, ready else { return }
                 Haptics.done()
             } catch is CancellationError {
                 if generation == attempt { state = .idle }
@@ -73,51 +95,91 @@ final class MicrosoftAccount: ObservableObject {
         generation = UUID()
         signing?.cancel()
         signing = nil
+        handoverTask?.cancel()
+        handoverTask = nil
+        sessionReady = false
         state = .idle
     }
 
     func signOut() async {
         cancel()
-        Vault.write(nil)
+        let answer = await Bridge.send("launcher-session off")
+        guard answer.error == nil, answer["ok"] as? Bool == true else {
+            state = .failed(answer.error ?? "Could not sign out of the game. Try again.")
+            return
+        }
+        guard Vault.write(nil) else {
+            state = .failed("Could not remove the saved sign-in. Try again.")
+            return
+        }
         UserDefaults.standard.removeObject(forKey: "microsoftProfile")
         profile = nil
-        _ = await Bridge.send("launcher-session off")
     }
 
-    /// Give the game the account, renewing the Minecraft token first when it has under an hour left. Quiet on
-    /// failure: the game then plays offline, and the card says why.
-    func handOver() async {
-        guard profile != nil, let client = Self.clientID, var secrets = Vault.read(), !renewing else { return }
+    /// Concurrent startup and Play requests share a single renewal and handover.
+    @discardableResult
+    func handOver() async -> Bool {
+        guard profile != nil else { return true }
+        if let handoverTask { return await handoverTask.value }
         let attempt = generation
+        let task = Task { await handOverNow(attempt: attempt) }
+        handoverTask = task
+        let ready = await task.value
+        if generation == attempt { handoverTask = nil }
+        return ready
+    }
+
+    /// Do not launch with a stale cached profile or while sign-in is still in progress.
+    func prepareForPlay() async -> Bool {
+        if signing != nil { return false }
+        return await handOver()
+    }
+
+    private func handOverNow(attempt: UUID) async -> Bool {
+        sessionReady = false
+        guard let client = Self.clientID, var secrets = Vault.read() else {
+            _ = await Bridge.send("launcher-session off")
+            guard generation == attempt else { return false }
+            state = .failed("The saved account is unavailable. Sign in again.")
+            return false
+        }
         if secrets.expires.timeIntervalSinceNow < 3600 {
-            renewing = true
-            defer { renewing = false }
             do {
                 state = .working("Renewing your sign-in…")
                 let microsoft = try await refresh(client, secrets.refresh)
                 try await finish(microsoft: microsoft, attempt: attempt)
-                state = .idle
-                guard let renewed = Vault.read() else { return }
+                guard generation == attempt, let renewed = Vault.read() else { return false }
                 secrets = renewed
             } catch {
-                guard generation == attempt else { return }
+                guard generation == attempt else { return false }
                 _ = await Bridge.send("launcher-session off")
+                guard generation == attempt else { return false }
                 state = .failed("Sign in again: \(error.localizedDescription)")
-                return
+                return false
             }
         }
-        guard generation == attempt, let profile else { return }
+        guard generation == attempt, let profile else { return false }
         let session: [String: String] = [
             "name": profile.name, "uuid": profile.uuid, "access_token": secrets.token, "user_type": "msa",
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: session),
-              let json = String(data: data, encoding: .utf8)
-        else { return }
+              let json = String(data: data, encoding: .utf8) else {
+            state = .failed("Could not prepare the Minecraft session.")
+            return false
+        }
         let answer = await Bridge.send("launcher-session \(json)")
-        guard generation == attempt else { return }
+        guard generation == attempt else { return false }
         if let error = answer.error {
             state = .failed(error)
+            return false
         }
+        guard answer["ok"] as? Bool == true else {
+            state = .failed("The game did not confirm the Minecraft session.")
+            return false
+        }
+        sessionReady = true
+        state = .idle
+        return true
     }
 
     /// Steps 1 and 2: a code for the player to enter, then the wait for them to do it.
@@ -306,9 +368,14 @@ private enum Vault {
 
     @discardableResult
     static func write(_ secrets: Secrets?) -> Bool {
-        let deleted = SecItemDelete(query as CFDictionary)
-        guard let secrets else { return deleted == errSecSuccess || deleted == errSecItemNotFound }
+        guard let secrets else {
+            let status = SecItemDelete(query as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
         guard let data = try? JSONEncoder().encode(secrets) else { return false }
+        let changed = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if changed == errSecSuccess { return true }
+        guard changed == errSecItemNotFound else { return false }
         var item = query
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -321,6 +388,7 @@ private enum Vault {
 /// The Microsoft account on the Play page: who is signed in, or the way to sign in.
 struct AccountCard: View {
     @ObservedObject var account: MicrosoftAccount
+    @State private var applicationID = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -330,6 +398,9 @@ struct AccountCard: View {
                     Text("MICROSOFT ACCOUNT").font(Theme.mono(8)).foregroundStyle(Theme.textMuted)
                     Text(account.profile?.name ?? "Not signed in").font(Theme.sans(15, .semiBold))
                         .foregroundStyle(Theme.text)
+                    if account.profile != nil && !account.sessionReady {
+                        Text("Minecraft session not yet confirmed").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if account.profile != nil {
@@ -362,15 +433,28 @@ struct AccountCard: View {
             case .idle:
                 EmptyView()
             }
+            if account.profile != nil, case .failed = account.state, account.clientConfigured {
+                SecondaryButton(title: "Sign in again", icon: "key.fill") { account.signIn() }
+            }
             if account.profile == nil, !isSigning {
-                if MicrosoftAccount.clientID != nil {
-                    SecondaryButton(title: "Sign in with Microsoft", icon: "key.fill") { account.signIn() }
+                if account.clientConfigured {
+                    SecondaryButton(title: "Sign in with Microsoft / Xbox", icon: "key.fill") { account.signIn() }
                     Text("For servers that check accounts (online mode). Single player and LAN don't need it.")
                         .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
                 } else {
-                    Text("Microsoft sign-in is unavailable in this build. The app developer must configure an approved application ID. Single player and offline servers are available.")
+                    Text("Microsoft sign-in needs an application ID approved for Minecraft Java. Single player and offline servers are available.")
                         .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Developer setup") {
+                        Text("Enter your launcher's public Microsoft application (client) ID. This is not a password or token.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        TextField("Application (client) ID", text: $applicationID)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("microsoft-client-id")
+                        Button("Save application ID") {
+                            if account.configureClientID(applicationID) { applicationID = "" }
+                        }.accessibilityIdentifier("microsoft-client-id-save")
+                    }
                 }
             }
         }

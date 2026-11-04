@@ -90,11 +90,15 @@ struct HomeView: View {
             get: { link.problem != nil }, set: { if !$0 { link.problem = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(link.problem ?? "") }
         .task(id: shownName) { await head.load(shownName) }
-        .task(id: account.profile) { await account.handOver() }
+        .task(id: account.profile) { _ = await account.handOver() }
         .onChange(of: account.profile) { profile in
             if profile != nil { editingName = false; nameDraft = "" }
         }
-        .task { link.uncover = onPlay; await link.watch() }
+        .task {
+            link.uncover = onPlay
+            link.prepareAccount = { await account.prepareForPlay() }
+            await link.watch()
+        }
         .task(id: link.phase) {
             if link.phase == .waiting { await download.startAutomaticallyIfNeeded() }
         }
@@ -210,7 +214,7 @@ struct HomeView: View {
                 HStack(spacing: 8) {
                     Avatar(name: shownName, face: head.face, size: 26)
                     Text(shownName ?? "Offline player").font(.subheadline.weight(.medium)).lineLimit(1)
-                    if account.profile != nil {
+                    if account.sessionReady {
                         Image(systemName: "checkmark.seal.fill").font(.caption)
                             .accessibilityLabel("Microsoft account")
                     }
