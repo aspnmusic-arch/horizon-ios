@@ -1,7 +1,7 @@
 name: ios
 # The game for iPhone and iPad, and nothing else: the Rust game cross-compiled for aarch64-apple-ios, wrapped by
-# packaging/ios/project.yml's HorizonGame target, and uploaded as an unsigned .ipa. No tests run here. The .ipa is then posted to Discord when the repository secret
-# DISCORD_IPA_WEBHOOK is set.
+# packaging/ios/project.yml's HorizonGame target, tested in the simulator, and uploaded as an unsigned .ipa.
+# Push builds can post the .ipa to Discord when the repository secret DISCORD_IPA_WEBHOOK is set.
 on:
   push:
     branches: [main]
@@ -23,11 +23,13 @@ env:
   CARGO_INCREMENTAL: "0"
   # The app's own minimum (project.yml); rustc and cc read it, and the Xcode step's Cargo phase sees the same.
   IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  # macOS 15 defaults to Xcode 16, while the launcher needs the iOS 26 SDK.
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
 
 jobs:
   ipa:
-    # Build the arm64 iOS target on the standard Intel Mac pool while ARM Mac runners are unavailable.
-    runs-on: macos-26-intel
+    # Use the macOS 15 Intel pool when the macOS 26 pool cannot acquire a runner.
+    runs-on: macos-15-intel
     timeout-minutes: 90
     defaults:
       run:
