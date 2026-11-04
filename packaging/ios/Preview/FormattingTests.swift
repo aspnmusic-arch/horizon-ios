@@ -442,4 +442,22 @@ final class MicrosoftClientConfigurationTests: XCTestCase {
         XCTAssertNil(MicrosoftAccount.normalizeClientID("not-an-application-id"))
         XCTAssertNil(MicrosoftAccount.normalizeClientID(""))
     }
+
+    func testApplicationIDCanBeCorrectedBeforeSignIn() {
+        let defaults = UserDefaults.standard
+        let oldID = defaults.object(forKey: "horizonMicrosoftClientID")
+        let oldProfile = defaults.object(forKey: "microsoftProfile")
+        defer {
+            defaults.set(oldID, forKey: "horizonMicrosoftClientID")
+            defaults.set(oldProfile, forKey: "microsoftProfile")
+        }
+        defaults.removeObject(forKey: "horizonMicrosoftClientID")
+        defaults.removeObject(forKey: "microsoftProfile")
+        let account = MicrosoftAccount()
+        XCTAssertTrue(account.configureClientID("12345678-1234-1234-1234-123456789abc"))
+        XCTAssertFalse(account.configureClientID("invalid"))
+        XCTAssertEqual(MicrosoftAccount.clientID, "12345678-1234-1234-1234-123456789abc")
+        XCTAssertTrue(account.configureClientID("87654321-4321-4321-4321-cba987654321"))
+        XCTAssertEqual(MicrosoftAccount.clientID, "87654321-4321-4321-4321-cba987654321")
+    }
 }

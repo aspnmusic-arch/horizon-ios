@@ -32,11 +32,15 @@ final class MicrosoftAccount: ObservableObject {
     private var generation = UUID()
 
     /// The public application ID belongs to this launcher, not a secret or player credential.
-    static var clientID: String? {
+    static var bundledClientID: String? {
         let bundled = (Bundle.main.object(forInfoDictionaryKey: "HorizonMSAClientID") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let bundled, !bundled.isEmpty, !bundled.hasPrefix("$(") { return bundled }
-        return UserDefaults.standard.string(forKey: "horizonMicrosoftClientID")
+        guard let bundled, !bundled.hasPrefix("$(") else { return nil }
+        return normalizeClientID(bundled)
+    }
+
+    static var clientID: String? {
+        bundledClientID ?? UserDefaults.standard.string(forKey: "horizonMicrosoftClientID")
             .flatMap(normalizeClientID)
     }
 
@@ -47,7 +51,7 @@ final class MicrosoftAccount: ObservableObject {
     /// A developer can configure their own approved app without replacing the player's build.
     @discardableResult
     func configureClientID(_ value: String) -> Bool {
-        guard profile == nil, let id = Self.normalizeClientID(value) else {
+        guard profile == nil, Self.bundledClientID == nil, let id = Self.normalizeClientID(value) else {
             state = .failed("Enter the application (client) ID as a UUID, while signed out.")
             return false
         }
@@ -445,6 +449,8 @@ struct AccountCard: View {
                     Text("Microsoft sign-in needs an application ID approved for Minecraft Java. Single player and offline servers are available.")
                         .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if MicrosoftAccount.bundledClientID == nil {
                     DisclosureGroup("Developer setup") {
                         Text("Enter your launcher's public Microsoft application (client) ID. This is not a password or token.")
                             .font(.footnote).foregroundStyle(.secondary)
