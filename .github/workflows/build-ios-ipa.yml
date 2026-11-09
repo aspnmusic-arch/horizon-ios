@@ -1,0 +1,65 @@
+name: Build private Horizon iOS IPA
+
+on:
+  push:
+    branches: [codex/build-ios-ipa]
+    paths: [.github/workflows/build-ios-ipa.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - name: Prepare Minecraft resources
+        run: |
+          python3 tools/ios/fetch_minecraft.py
+          cargo build --profile fast -p horizon-prepare
+          ./target/fast/horizon-prepare --prepare --complete \
+            --minecraft-dir .local/mojang \
+            --server-jar .local/mojang/server/server-26.3.jar \
+            --java-home "$JAVA_HOME" --root "$PWD"
+      - name: Build the iPhone application
+        run: tools/ios/build_app.sh --device
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto target/ios/aarch64-apple-ios/Horizon.app "$RUNNER_TEMP/ipa/Payload/Horizon.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$RUNNER_TEMP/Horizon.ipa" Payload
+      # Public repository artifacts are downloadable by anyone with read access.
+      # The IPA is encrypted before upload for the matching private certificate.
+      - name: Encrypt the IPA for the repository owner
+        env:
+          CERT_DER_B64: MIIDrDCCAhSgAwIBAgIIXac3SkbN1RswDQYJKoZIhvcNAQELBQAwFjEUMBIGA1UEAxMLSG9yaXpvbiBJUEEwHhcNMjYxMTA4MDI0NTQ4WhcNMzYxMTA5MDI0NTQ4WjAWMRQwEgYDVQQDEwtIb3Jpem9uIElQQTCCAaIwDQYJKoZIhvcNAQEBBQADggGPADCCAYoCggGBAKqW497vMW5U+UUY0LIZLANrGoQ5cdNjIpCGDJWLRuxVkE0+j2h4Ih/F3mX5iBiHnbO4tadxoiXbQQEY9XBIoXbahfPy1DAAzbd+aTCq4ZAHWd6Ng3GKpqxa9kdFF9DopIPCG+BjyhFUj0/xYtJuSSVwwSLW65a8pBui4xgYpyaDQEAXp6wzF3HxxyC7yygA55JC4CNELhPUY6jEsdFV1nTDijxexSBbcRD+RqTrY/XkPCJv/lhTdDJ46J5cqHblaCb/YVOJxNr37XLTrGjnX/0+PuMGVUJCIcfEMdnepCxD6FIa118xTCguKNxaVMKgKKzd/MUwMnWwqDXJ9x/KoL1XCRhDGp7gW+2nglot23mGyObJcJn8zXsEaDjOsg7Eg1KnKe4uG3ebF5fil0JjIyWJGj4pL1J/p08XAAPIVayvs+TOgttJrcNFaP53wRkVaxiuNiFqsL5n/gQyvLdQx/2vsgax0Dv98EbgTBTUJh+kHGwq1O+YCR+WS7K4bgBmiQIDAQABMA0GCSqGSIb3DQEBCwUAA4IBgQCWFJ7uc4ENi9aEPKSEhFOxZjlDBWmpHCWqWIhCneFwt3odXpiVPBeVmc0eZQLObLgO1I7J54NY+n1UeGXBD/lQxSFuNm9J+ubAHpt07j+vz+6c9hYijJmLWAA/FnFaUgV+evLaHNK4YrVIKYsZxECYB2Wcbr1ynJaHV5EmobaeIyz2nhkeVTYRgbwNEipCDtegaQDjIQF26UPKufOp06f6qgpvAxzpGtlavoIVEmksQeiApfv1UO1smQ//IEp77tDCHtqS8jBNi5q+kayfIVudhqouI+FNidwAsMIDuTH2nHg6b52gMsN3gG5+qo5YBSq4l9w+y5St6hlwmSnl/PFXfEd7Jxdkl6BRTdrHT63jm+Yp9RkJlhZa3VtmeCd16DrLEnM04oi60pobqiSvPoYW1Y5r4gSFTFzTeKUiNuoQJb6Lq2hij13jYlhyiCVJ0+d1KJ4NtwUEabUIhQ25wZ8Plsu96KbW5mOjmcqShud2f9nDjSCqfRXT/qdPw7FKNGI=
+        run: |
+          python3 -c 'import base64, os, ssl, pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "recipient.pem").write_text(ssl.DER_cert_to_PEM_cert(base64.b64decode(os.environ["CERT_DER_B64"])))'
+          "$(brew --prefix openssl@3)/bin/openssl" cms -encrypt -aes-256-cbc -binary \
+            -in "$RUNNER_TEMP/Horizon.ipa" -outform DER \
+            -out Horizon.ipa.p7m "$RUNNER_TEMP/recipient.pem"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-ios-ipa-cifrada
+          path: Horizon.ipa.p7m
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
